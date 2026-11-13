@@ -1,0 +1,55 @@
+{
+  "model_name": "XGBoost",
+  "trained_at": "20261113_152839",
+  "metrics": {
+    "RandomForest": {
+      "MAE": 40.2231,
+      "RMSE": 66.4194,
+      "R2": 0.978
+    },
+    "XGBoost": {
+      "MAE": 37.0749,
+      "RMSE": 55.5947,
+      "R2": 0.9846
+    }
+  },
+  "feature_columns": [
+    "p_min",
+    "p_max",
+    "day_of_week",
+    "day_of_month",
+    "month",
+    "year",
+    "week_of_year",
+    "is_weekend",
+    "price_spread",
+    "price_spread_pct",
+    "lag_1",
+    "lag_2",
+    "lag_3",
+    "lag_7",
+    "lag_14",
+    "rolling_mean_3",
+    "rolling_std_3",
+    "rolling_min_3",
+    "rolling_max_3",
+    "rolling_mean_7",
+    "rolling_std_7",
+    "rolling_min_7",
+    "rolling_max_7",
+    "rolling_mean_14",
+    "rolling_std_14",
+    "rolling_min_14",
+    "rolling_max_14",
+    "rolling_mean_30",
+    "rolling_std_30",
+    "rolling_min_30",
+    "rolling_max_30",
+    "price_change_1d",
+    "price_change_7d",
+    "market_id_encoded",
+    "market_name_encoded",
+    "district_name_encoded",
+    "variety_encoded"
+  ]
+}

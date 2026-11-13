@@ -1,0 +1,91 @@
+# =============================================================================
+# docker-compose.yml - Tomato Price Prediction Multi-Container Setup
+# =============================================================================
+version: "3.9"
+
+services:
+  # ---- ML Prediction API Service ----
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: tomato-prediction-api
+    restart: unless-stopped
+    ports:
+      - "${API_PORT:-8000}:8000"
+    environment:
+      - PORT=8000
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - MODEL_PATH=/app/models/tomato_price_model.joblib
+      - DATA_PATH=/app/data
+      - NOTIFICATION_RECIPIENT=priya@iservce.onmicrosoft.com
+      # Redis Cache
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - REDIS_ENABLED=true
+    volumes:
+      - ./models:/app/models
+      - ./data:/app/data
+      - api-logs:/app/logs
+    depends_on:
+      redis:
+        condition: service_healthy
+    networks:
+      - tomato-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/api/health"]
+      interval: 20s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+  # ---- Frontend Website ----
+  frontend:
+    build:
+      context: .
+      dockerfile: Dockerfile.frontend
+    container_name: tomato-prediction-frontend
+    restart: unless-stopped
+    ports:
+      - "${FRONTEND_PORT:-3000}:80"
+    depends_on:
+      api:
+        condition: service_healthy
+    networks:
+      - tomato-network
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost/nginx-health"]
+      interval: 20s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  # ---- Redis Cache ----
+  redis:
+    image: redis:7-alpine
+    container_name: tomato-prediction-redis
+    restart: unless-stopped
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    command: redis-server --maxmemory 128mb --maxmemory-policy allkeys-lru --appendonly yes
+    volumes:
+      - redis-data:/data
+    networks:
+      - tomato-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+
+volumes:
+  api-logs:
+    driver: local
+  redis-data:
+    driver: local
+
+networks:
+  tomato-network:
+    driver: bridge
+    name: tomato-prediction-net

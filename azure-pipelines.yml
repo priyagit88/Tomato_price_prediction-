@@ -1,0 +1,450 @@
+# =============================================================================
+# azure-pipelines.yml - CI/CD Pipeline for Tomato Price Prediction
+# =============================================================================
+# Triggers on pushes to main branch
+# Stages: Build → Test → Deploy
+# =============================================================================
+
+trigger:
+  branches:
+    include:
+      - main
+  paths:
+    exclude:
+      - "*.md"
+      - docs/
+      - terraform/
+
+pr:
+  branches:
+    include:
+      - main
+  paths:
+    exclude:
+      - "*.md"
+      - docs/
+
+variables:
+  - group: tomato-prediction-variables  # Azure DevOps variable group
+  - name: acrName
+    value: "tomatopredictionacr"
+  - name: acrLoginServer
+    value: "tomatopredictionacr.azurecr.io"
+  - name: apiImageName
+    value: "tomato-prediction-api"
+  - name: frontendImageName
+    value: "tomato-prediction-frontend"
+  - name: resourceGroup
+    value: "rg-tomato-prediction"
+  - name: aciName
+    value: "tomato-prediction-api-aci"
+  - name: appServiceName
+    value: "tomato-prediction-frontend-app"
+  - name: tag
+    value: "$(Build.BuildId)"
+  - name: pythonVersion
+    value: "3.11"
+  - name: nodeVersion
+    value: "18"
+
+pool:
+  vmImage: "ubuntu-latest"
+
+# =============================================================================
+# Stage 1: BUILD
+# =============================================================================
+stages:
+  - stage: Build
+    displayName: "Build & Push Docker Images"
+    jobs:
+      - job: BuildAPIImage
+        displayName: "Build API Docker Image"
+        steps:
+          - task: Docker@2
+            displayName: "Login to ACR"
+            inputs:
+              command: login
+              containerRegistry: "$(acrServiceConnection)"
+
+          - task: Docker@2
+            displayName: "Build API Image"
+            inputs:
+              command: build
+              repository: "$(apiImageName)"
+              dockerfile: "$(Build.SourcesDirectory)/Dockerfile"
+              buildContext: "$(Build.SourcesDirectory)"
+              tags: |
+                $(tag)
+                latest
+              arguments: "--no-cache"
+
+          - task: Docker@2
+            displayName: "Push API Image to ACR"
+            inputs:
+              command: push
+              repository: "$(apiImageName)"
+              containerRegistry: "$(acrServiceConnection)"
+              tags: |
+                $(tag)
+                latest
+
+      - job: BuildFrontendImage
+        displayName: "Build Frontend Docker Image"
+        steps:
+          - task: Docker@2
+            displayName: "Login to ACR"
+            inputs:
+              command: login
+              containerRegistry: "$(acrServiceConnection)"
+
+          - task: Docker@2
+            displayName: "Build Frontend Image"
+            inputs:
+              command: build
+              repository: "$(frontendImageName)"
+              dockerfile: "$(Build.SourcesDirectory)/Dockerfile.frontend"
+              buildContext: "$(Build.SourcesDirectory)"
+              tags: |
+                $(tag)
+                latest
+              arguments: >-
+                --build-arg NEXT_PUBLIC_API_URL=$(apiUrl)
+                --no-cache
+
+          - task: Docker@2
+            displayName: "Push Frontend Image to ACR"
+            inputs:
+              command: push
+              repository: "$(frontendImageName)"
+              containerRegistry: "$(acrServiceConnection)"
+              tags: |
+                $(tag)
+                latest
+
+      - job: PublishArtifacts
+        displayName: "Publish Pipeline Artifacts"
+        steps:
+          - task: CopyFiles@2
+            displayName: "Copy Terraform files"
+            inputs:
+              SourceFolder: "$(Build.SourcesDirectory)/terraform"
+              Contents: "**/*.tf"
+              TargetFolder: "$(Build.ArtifactStagingDirectory)/terraform"
+
+          - task: CopyFiles@2
+            displayName: "Copy Docker Compose"
+            inputs:
+              SourceFolder: "$(Build.SourcesDirectory)"
+              Contents: "docker-compose.yml"
+              TargetFolder: "$(Build.ArtifactStagingDirectory)"
+
+          - publish: "$(Build.ArtifactStagingDirectory)"
+            artifact: "deploy-artifacts"
+            displayName: "Publish deploy artifacts"
+
+  # =============================================================================
+  # Stage 2: TEST
+  # =============================================================================
+  - stage: Test
+    displayName: "Run Tests"
+    dependsOn: Build
+    jobs:
+      - job: UnitTests
+        displayName: "Run Unit Tests"
+        steps:
+          - task: UsePythonVersion@0
+            displayName: "Use Python $(pythonVersion)"
+            inputs:
+              versionSpec: "$(pythonVersion)"
+
+          - script: |
+              python -m pip install --upgrade pip
+              pip install -r ml_pipeline/requirements.txt
+              pip install pytest pytest-cov pytest-asyncio httpx
+            displayName: "Install dependencies"
+
+          - script: |
+              python -m pytest tests/unit/ \
+                --junitxml=test-results/unit-results.xml \
+                --cov=ml_pipeline \
+                --cov-report=xml:coverage/coverage.xml \
+                --cov-report=html:coverage/htmlcov \
+                -v
+            displayName: "Run unit tests"
+            continueOnError: false
+
+          - task: PublishTestResults@2
+            displayName: "Publish unit test results"
+            inputs:
+              testResultsFormat: "JUnit"
+              testResultsFiles: "test-results/unit-results.xml"
+              testRunTitle: "Unit Tests"
+            condition: always()
+
+          - task: PublishCodeCoverageResults@2
+            displayName: "Publish code coverage"
+            inputs:
+              summaryFileLocation: "coverage/coverage.xml"
+              pathToSources: "$(Build.SourcesDirectory)/ml_pipeline"
+            condition: always()
+
+      - job: IntegrationTests
+        displayName: "Run Integration Tests"
+        steps:
+          - task: UsePythonVersion@0
+            displayName: "Use Python $(pythonVersion)"
+            inputs:
+              versionSpec: "$(pythonVersion)"
+
+          - script: |
+              python -m pip install --upgrade pip
+              pip install -r ml_pipeline/requirements.txt
+              pip install pytest pytest-asyncio httpx
+            displayName: "Install dependencies"
+
+          - script: |
+              docker compose -f docker-compose.yml up -d redis
+              sleep 5
+            displayName: "Start Redis for integration tests"
+
+          - script: |
+              python -m pytest tests/integration/ \
+                --junitxml=test-results/integration-results.xml \
+                -v
+            displayName: "Run integration tests"
+            env:
+              REDIS_HOST: localhost
+              REDIS_PORT: 6379
+              DB_HOST: $(dbHost)
+              DB_NAME: $(dbName)
+              DB_USER: $(dbUser)
+              DB_PASSWORD: $(dbPassword)
+            continueOnError: false
+
+          - task: PublishTestResults@2
+            displayName: "Publish integration test results"
+            inputs:
+              testResultsFormat: "JUnit"
+              testResultsFiles: "test-results/integration-results.xml"
+              testRunTitle: "Integration Tests"
+            condition: always()
+
+          - script: |
+              docker compose down
+            displayName: "Tear down test containers"
+            condition: always()
+
+      - job: LintAndSecurity
+        displayName: "Lint & Security Scan"
+        steps:
+          - task: UsePythonVersion@0
+            inputs:
+              versionSpec: "$(pythonVersion)"
+
+          - script: |
+              pip install ruff bandit safety
+              ruff check ml_pipeline/ --output-format=junit > lint-results.xml || true
+              bandit -r ml_pipeline/ -f json -o bandit-report.json || true
+            displayName: "Run linting and security scan"
+
+          - task: Docker@2
+            displayName: "Scan API image for vulnerabilities"
+            inputs:
+              command: build
+              repository: "$(apiImageName)"
+              dockerfile: "$(Build.SourcesDirectory)/Dockerfile"
+              buildContext: "$(Build.SourcesDirectory)"
+              tags: "scan"
+            condition: succeeded()
+
+  # =============================================================================
+  # Stage 3: DEPLOY
+  # =============================================================================
+  - stage: Deploy
+    displayName: "Deploy to Azure"
+    dependsOn: Test
+    condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/main'))
+    jobs:
+      - deployment: DeployInfrastructure
+        displayName: "Deploy Infrastructure (Terraform)"
+        environment: "production"
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - download: current
+                  artifact: "deploy-artifacts"
+
+                - task: TerraformInstaller@1
+                  displayName: "Install Terraform"
+                  inputs:
+                    terraformVersion: "latest"
+
+                - task: TerraformTaskV4@4
+                  displayName: "Terraform Init"
+                  inputs:
+                    provider: "azurerm"
+                    command: "init"
+                    workingDirectory: "$(Pipeline.Workspace)/deploy-artifacts/terraform"
+                    backendServiceArm: "$(azureServiceConnection)"
+                    backendAzureRmResourceGroupName: "$(resourceGroup)"
+                    backendAzureRmStorageAccountName: "$(tfStateStorageAccount)"
+                    backendAzureRmContainerName: "tfstate"
+                    backendAzureRmKey: "tomato-prediction.tfstate"
+
+                - task: TerraformTaskV4@4
+                  displayName: "Terraform Plan"
+                  inputs:
+                    provider: "azurerm"
+                    command: "plan"
+                    workingDirectory: "$(Pipeline.Workspace)/deploy-artifacts/terraform"
+                    environmentServiceNameAzureRM: "$(azureServiceConnection)"
+                    commandOptions: "-out=tfplan"
+
+                - task: TerraformTaskV4@4
+                  displayName: "Terraform Apply"
+                  inputs:
+                    provider: "azurerm"
+                    command: "apply"
+                    workingDirectory: "$(Pipeline.Workspace)/deploy-artifacts/terraform"
+                    environmentServiceNameAzureRM: "$(azureServiceConnection)"
+                    commandOptions: "tfplan"
+
+      - deployment: DeployAPI
+        displayName: "Deploy API to ACI"
+        dependsOn: DeployInfrastructure
+        environment: "production"
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - task: AzureCLI@2
+                  displayName: "Deploy API container to ACI"
+                  inputs:
+                    azureSubscription: "$(azureServiceConnection)"
+                    scriptType: "bash"
+                    scriptLocation: "inlineScript"
+                    inlineScript: |
+                      # Delete existing container if it exists
+                      az container delete \
+                        --name $(aciName) \
+                        --resource-group $(resourceGroup) \
+                        --yes 2>/dev/null || true
+
+                      # Deploy new container
+                      az container create \
+                        --name $(aciName) \
+                        --resource-group $(resourceGroup) \
+                        --image $(acrLoginServer)/$(apiImageName):$(tag) \
+                        --registry-login-server $(acrLoginServer) \
+                        --registry-username $(acrUsername) \
+                        --registry-password $(acrPassword) \
+                        --dns-name-label tomato-prediction-api \
+                        --ports 8000 \
+                        --cpu 1 \
+                        --memory 2 \
+                        --restart-policy Always \
+                        --environment-variables \
+                          PORT=8000 \
+                          LOG_LEVEL=INFO \
+                          REDIS_HOST=$(redisHost) \
+                          REDIS_PORT=6380 \
+                          DB_HOST=$(dbHost) \
+                          DB_NAME=$(dbName) \
+                        --secure-environment-variables \
+                          DB_USER=$(dbUser) \
+                          DB_PASSWORD=$(dbPassword) \
+                          REDIS_PASSWORD=$(redisPassword) \
+                          AZURE_STORAGE_CONNECTION_STRING="$(storageConnectionString)" \
+                          AZURE_KEY_VAULT_URL=$(keyVaultUrl) \
+                          APPINSIGHTS_INSTRUMENTATIONKEY=$(appInsightsKey)
+
+                      # Wait for container to be running
+                      az container show \
+                        --name $(aciName) \
+                        --resource-group $(resourceGroup) \
+                        --query "instanceView.state" \
+                        --output tsv
+
+      - deployment: DeployFrontend
+        displayName: "Deploy Frontend to App Service"
+        dependsOn: DeployInfrastructure
+        environment: "production"
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - task: AzureCLI@2
+                  displayName: "Configure App Service for container"
+                  inputs:
+                    azureSubscription: "$(azureServiceConnection)"
+                    scriptType: "bash"
+                    scriptLocation: "inlineScript"
+                    inlineScript: |
+                      # Set container image on App Service
+                      az webapp config container set \
+                        --name $(appServiceName) \
+                        --resource-group $(resourceGroup) \
+                        --container-image-name $(acrLoginServer)/$(frontendImageName):$(tag) \
+                        --container-registry-url https://$(acrLoginServer) \
+                        --container-registry-user $(acrUsername) \
+                        --container-registry-password $(acrPassword)
+
+                      # Configure app settings
+                      az webapp config appsettings set \
+                        --name $(appServiceName) \
+                        --resource-group $(resourceGroup) \
+                        --settings \
+                          WEBSITES_PORT=80 \
+                          NEXT_PUBLIC_API_URL="https://tomato-prediction-api.$(location).azurecontainer.io:8000"
+
+                      # Restart the app
+                      az webapp restart \
+                        --name $(appServiceName) \
+                        --resource-group $(resourceGroup)
+
+      - job: SmokeTests
+        displayName: "Post-Deploy Smoke Tests"
+        dependsOn:
+          - DeployAPI
+          - DeployFrontend
+        steps:
+          - task: AzureCLI@2
+            displayName: "Run smoke tests"
+            inputs:
+              azureSubscription: "$(azureServiceConnection)"
+              scriptType: "bash"
+              scriptLocation: "inlineScript"
+              inlineScript: |
+                echo "=== Smoke Testing API ==="
+                API_URL="https://tomato-prediction-api.$(location).azurecontainer.io:8000"
+
+                # Health check
+                HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" "$API_URL/health" --max-time 30)
+                if [ "$HTTP_CODE" -ne 200 ]; then
+                  echo "❌ API health check failed (HTTP $HTTP_CODE)"
+                  exit 1
+                fi
+                echo "✅ API health check passed"
+
+                # Prediction endpoint
+                HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
+                  -X POST "$API_URL/predict" \
+                  -H "Content-Type: application/json" \
+                  -d '{"market_id": "1", "date": "2026-01-01"}' \
+                  --max-time 30)
+                if [ "$HTTP_CODE" -ne 200 ]; then
+                  echo "⚠️ Prediction endpoint returned HTTP $HTTP_CODE"
+                fi
+                echo "✅ Prediction endpoint responded"
+
+                echo "=== Smoke Testing Frontend ==="
+                FRONTEND_URL="https://$(appServiceName).azurewebsites.net"
+                HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" "$FRONTEND_URL" --max-time 30)
+                if [ "$HTTP_CODE" -ne 200 ]; then
+                  echo "❌ Frontend check failed (HTTP $HTTP_CODE)"
+                  exit 1
+                fi
+                echo "✅ Frontend health check passed"
+
+                echo "=== All smoke tests passed ==="

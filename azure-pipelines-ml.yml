@@ -1,0 +1,388 @@
+# =============================================================================
+# azure-pipelines-ml.yml - ML Model Retraining Pipeline
+# =============================================================================
+# Scheduled daily at 6:00 AM IST (00:30 UTC) for automated model retraining
+# =============================================================================
+
+trigger: none  # No CI trigger - scheduled only
+
+pr: none  # No PR trigger
+
+schedules:
+  - cron: "30 0 * * *"  # 00:30 UTC = 06:00 IST
+    displayName: "Daily Model Retraining (6 AM IST)"
+    branches:
+      include:
+        - main
+    always: true  # Run even if no code changes
+
+variables:
+  - group: tomato-prediction-variables
+  - name: acrName
+    value: "tomatopredictionacr"
+  - name: acrLoginServer
+    value: "tomatopredictionacr.azurecr.io"
+  - name: apiImageName
+    value: "tomato-prediction-api"
+  - name: resourceGroup
+    value: "rg-tomato-prediction"
+  - name: aciName
+    value: "tomato-prediction-api-aci"
+  - name: pythonVersion
+    value: "3.11"
+  - name: modelImprovementThreshold
+    value: "0.05"  # 5% improvement required to deploy new model
+
+pool:
+  vmImage: "ubuntu-latest"
+
+stages:
+  # =============================================================================
+  # Stage 1: FETCH DATA
+  # =============================================================================
+  - stage: FetchData
+    displayName: "Fetch Latest Market Data"
+    jobs:
+      - job: DownloadData
+        displayName: "Download latest price data"
+        steps:
+          - task: UsePythonVersion@0
+            displayName: "Use Python $(pythonVersion)"
+            inputs:
+              versionSpec: "$(pythonVersion)"
+
+          - script: |
+              pip install --upgrade pip
+              pip install -r ml_pipeline/requirements.txt
+            displayName: "Install dependencies"
+
+          - task: AzureCLI@2
+            displayName: "Fetch new data from Blob Storage"
+            inputs:
+              azureSubscription: "$(azureServiceConnection)"
+              scriptType: "bash"
+              scriptLocation: "inlineScript"
+              inlineScript: |
+                # Download latest CSV data from Azure Blob Storage
+                az storage blob download-batch \
+                  --destination data/raw/ \
+                  --source tomato-data \
+                  --pattern "*.csv" \
+                  --account-name $(storageAccountName) \
+                  --account-key $(storageAccountKey) \
+                  --overwrite true
+
+                echo "Downloaded files:"
+                ls -la data/raw/
+
+                # Count records
+                TOTAL_RECORDS=$(cat data/raw/*.csv | wc -l)
+                echo "Total records across all files: $TOTAL_RECORDS"
+                echo "##vso[task.setvariable variable=totalRecords;isOutput=true]$TOTAL_RECORDS"
+              name: fetchData
+
+          - publish: "$(Build.SourcesDirectory)/data/raw"
+            artifact: "raw-data"
+            displayName: "Publish raw data"
+
+  # =============================================================================
+  # Stage 2: PREPROCESS & RETRAIN
+  # =============================================================================
+  - stage: RetrainModel
+    displayName: "Preprocess Data & Retrain Model"
+    dependsOn: FetchData
+    jobs:
+      - job: Retrain
+        displayName: "Run retraining pipeline"
+        timeoutInMinutes: 120
+        steps:
+          - task: UsePythonVersion@0
+            displayName: "Use Python $(pythonVersion)"
+            inputs:
+              versionSpec: "$(pythonVersion)"
+
+          - download: current
+            artifact: "raw-data"
+            patterns: "**/*.csv"
+
+          - script: |
+              mkdir -p data/raw
+              cp $(Pipeline.Workspace)/raw-data/*.csv data/raw/
+            displayName: "Restore raw data"
+
+          - script: |
+              pip install --upgrade pip
+              pip install -r ml_pipeline/requirements.txt
+            displayName: "Install dependencies"
+
+          - script: |
+              echo "=== Step 1: Data Preprocessing ==="
+              python -m ml_pipeline.data_preprocessing
+            displayName: "Run data preprocessing"
+            env:
+              DATA_PATH: "$(Build.SourcesDirectory)/data"
+
+          - script: |
+              echo "=== Step 2: Model Training ==="
+              python -m ml_pipeline.train_model 2>&1 | tee training_output.log
+
+              # Extract metrics from training output
+              echo "##vso[task.setvariable variable=trainingComplete]true"
+            displayName: "Train models"
+            env:
+              DATA_PATH: "$(Build.SourcesDirectory)/data"
+              MODEL_PATH: "$(Build.SourcesDirectory)/models"
+
+          - script: |
+              echo "=== Step 3: Run Retraining Pipeline ==="
+              python -m ml_pipeline.retrain_pipeline 2>&1 | tee retrain_output.log
+
+              # Parse improvement metrics
+              if grep -q "Model improved" retrain_output.log; then
+                echo "##vso[task.setvariable variable=modelImproved;isOutput=true]true"
+                echo "✅ New model shows improvement - will deploy"
+              else
+                echo "##vso[task.setvariable variable=modelImproved;isOutput=true]false"
+                echo "ℹ️ No significant improvement - keeping current model"
+              fi
+            displayName: "Evaluate and compare models"
+            name: evaluation
+            env:
+              DATA_PATH: "$(Build.SourcesDirectory)/data"
+              MODEL_PATH: "$(Build.SourcesDirectory)/models"
+              IMPROVEMENT_THRESHOLD: "$(modelImprovementThreshold)"
+
+          - task: AzureCLI@2
+            displayName: "Upload model artifacts to Blob Storage"
+            inputs:
+              azureSubscription: "$(azureServiceConnection)"
+              scriptType: "bash"
+              scriptLocation: "inlineScript"
+              inlineScript: |
+                # Upload trained models to blob storage
+                az storage blob upload-batch \
+                  --destination tomato-models \
+                  --source models/ \
+                  --account-name $(storageAccountName) \
+                  --account-key $(storageAccountKey) \
+                  --overwrite true
+
+                # Upload with build tag for versioning
+                az storage blob upload-batch \
+                  --destination "tomato-models/$(Build.BuildId)" \
+                  --source models/ \
+                  --account-name $(storageAccountName) \
+                  --account-key $(storageAccountKey) \
+                  --overwrite true
+
+                echo "Models uploaded with version tag: $(Build.BuildId)"
+
+          - publish: "$(Build.SourcesDirectory)/models"
+            artifact: "trained-models"
+            displayName: "Publish model artifacts"
+
+          - publish: "$(Build.SourcesDirectory)/retrain_output.log"
+            artifact: "retrain-log"
+            displayName: "Publish retraining log"
+            condition: always()
+
+  # =============================================================================
+  # Stage 3: DEPLOY UPDATED MODEL
+  # =============================================================================
+  - stage: DeployModel
+    displayName: "Deploy Updated Model"
+    dependsOn: RetrainModel
+    condition: and(succeeded(), eq(dependencies.RetrainModel.outputs['Retrain.evaluation.modelImproved'], 'true'))
+    jobs:
+      - deployment: DeployNewModel
+        displayName: "Deploy retrained model to production"
+        environment: "production"
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - download: current
+                  artifact: "trained-models"
+
+                - task: Docker@2
+                  displayName: "Login to ACR"
+                  inputs:
+                    command: login
+                    containerRegistry: "$(acrServiceConnection)"
+
+                - task: Docker@2
+                  displayName: "Build updated API image"
+                  inputs:
+                    command: build
+                    repository: "$(apiImageName)"
+                    dockerfile: "$(Build.SourcesDirectory)/Dockerfile"
+                    buildContext: "$(Build.SourcesDirectory)"
+                    tags: |
+                      $(Build.BuildId)-retrained
+                      latest
+                    arguments: "--no-cache"
+
+                - task: Docker@2
+                  displayName: "Push updated API image"
+                  inputs:
+                    command: push
+                    repository: "$(apiImageName)"
+                    containerRegistry: "$(acrServiceConnection)"
+                    tags: |
+                      $(Build.BuildId)-retrained
+                      latest
+
+                - task: AzureCLI@2
+                  displayName: "Update ACI with new model"
+                  inputs:
+                    azureSubscription: "$(azureServiceConnection)"
+                    scriptType: "bash"
+                    scriptLocation: "inlineScript"
+                    inlineScript: |
+                      # Update the running container with the new image
+                      az container delete \
+                        --name $(aciName) \
+                        --resource-group $(resourceGroup) \
+                        --yes 2>/dev/null || true
+
+                      az container create \
+                        --name $(aciName) \
+                        --resource-group $(resourceGroup) \
+                        --image $(acrLoginServer)/$(apiImageName):$(Build.BuildId)-retrained \
+                        --registry-login-server $(acrLoginServer) \
+                        --registry-username $(acrUsername) \
+                        --registry-password $(acrPassword) \
+                        --dns-name-label tomato-prediction-api \
+                        --ports 8000 \
+                        --cpu 1 \
+                        --memory 2 \
+                        --restart-policy Always \
+                        --environment-variables \
+                          PORT=8000 \
+                          LOG_LEVEL=INFO \
+                          REDIS_HOST=$(redisHost) \
+                          REDIS_PORT=6380 \
+                          DB_HOST=$(dbHost) \
+                          DB_NAME=$(dbName) \
+                        --secure-environment-variables \
+                          DB_USER=$(dbUser) \
+                          DB_PASSWORD=$(dbPassword) \
+                          REDIS_PASSWORD=$(redisPassword) \
+                          AZURE_STORAGE_CONNECTION_STRING="$(storageConnectionString)" \
+                          AZURE_KEY_VAULT_URL=$(keyVaultUrl) \
+                          APPINSIGHTS_INSTRUMENTATIONKEY=$(appInsightsKey)
+
+                      echo "✅ ACI updated with retrained model"
+
+                - task: AzureCLI@2
+                  displayName: "Verify deployment health"
+                  inputs:
+                    azureSubscription: "$(azureServiceConnection)"
+                    scriptType: "bash"
+                    scriptLocation: "inlineScript"
+                    inlineScript: |
+                      echo "Waiting for container to start..."
+                      sleep 30
+
+                      API_URL="https://tomato-prediction-api.$(location).azurecontainer.io:8000"
+
+                      for i in {1..5}; do
+                        HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" "$API_URL/health" --max-time 15)
+                        if [ "$HTTP_CODE" -eq 200 ]; then
+                          echo "✅ Deployment verified - API is healthy"
+                          exit 0
+                        fi
+                        echo "Attempt $i: HTTP $HTTP_CODE - retrying in 15s..."
+                        sleep 15
+                      done
+
+                      echo "⚠️ API health check did not pass after 5 attempts"
+                      exit 1
+
+  # =============================================================================
+  # Stage 4: NOTIFY
+  # =============================================================================
+  - stage: Notify
+    displayName: "Send Notifications"
+    dependsOn:
+      - RetrainModel
+      - DeployModel
+    condition: always()
+    jobs:
+      - job: SendNotification
+        displayName: "Send completion notification"
+        steps:
+          - task: AzureCLI@2
+            displayName: "Send email notification via Logic App"
+            inputs:
+              azureSubscription: "$(azureServiceConnection)"
+              scriptType: "bash"
+              scriptLocation: "inlineScript"
+              inlineScript: |
+                # Determine status
+                RETRAIN_RESULT="${STAGE_RETRAINMODEL_STATUS:-Unknown}"
+                DEPLOY_RESULT="${STAGE_DEPLOYMODEL_STATUS:-Skipped}"
+                BUILD_URL="$(System.CollectionUri)$(System.TeamProject)/_build/results?buildId=$(Build.BuildId)"
+
+                if [ "$RETRAIN_RESULT" == "Succeeded" ] && [ "$DEPLOY_RESULT" == "Succeeded" ]; then
+                  STATUS="✅ SUCCESS - Model retrained and deployed"
+                  COLOR="good"
+                elif [ "$RETRAIN_RESULT" == "Succeeded" ] && [ "$DEPLOY_RESULT" == "Skipped" ]; then
+                  STATUS="ℹ️ COMPLETED - Model retrained but no improvement (deployment skipped)"
+                  COLOR="warning"
+                else
+                  STATUS="❌ FAILED - Check pipeline logs"
+                  COLOR="danger"
+                fi
+
+                SUBJECT="Tomato Price Prediction - ML Retraining Report ($(Build.BuildId))"
+                BODY="<h2>ML Model Retraining Report</h2>
+                <p><strong>Status:</strong> ${STATUS}</p>
+                <p><strong>Build ID:</strong> $(Build.BuildId)</p>
+                <p><strong>Triggered:</strong> $(Build.Reason)</p>
+                <p><strong>Date:</strong> $(date -u '+%Y-%m-%d %H:%M UTC')</p>
+                <p><strong>Pipeline:</strong> <a href='${BUILD_URL}'>View Pipeline Run</a></p>
+                <hr>
+                <p><strong>Retraining Stage:</strong> ${RETRAIN_RESULT}</p>
+                <p><strong>Deployment Stage:</strong> ${DEPLOY_RESULT}</p>"
+
+                # Send via Logic App webhook
+                curl -X POST "$(logicAppWebhookUrl)" \
+                  -H "Content-Type: application/json" \
+                  -d "{
+                    \"to\": \"$(notificationEmail)\",
+                    \"subject\": \"${SUBJECT}\",
+                    \"body\": \"${BODY}\"
+                  }" --max-time 30 || echo "⚠️ Notification webhook failed"
+
+                echo "Notification sent to $(notificationEmail)"
+
+          - task: AzureCLI@2
+            displayName: "Log metrics to Application Insights"
+            inputs:
+              azureSubscription: "$(azureServiceConnection)"
+              scriptType: "bash"
+              scriptLocation: "inlineScript"
+              inlineScript: |
+                # Log retraining event to Application Insights
+                TIMESTAMP=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
+                curl -X POST "https://dc.services.visualstudio.com/v2/track" \
+                  -H "Content-Type: application/json" \
+                  -d "{
+                    \"name\": \"AppEvents\",
+                    \"iKey\": \"$(appInsightsKey)\",
+                    \"data\": {
+                      \"baseType\": \"EventData\",
+                      \"baseData\": {
+                        \"name\": \"ModelRetraining\",
+                        \"properties\": {
+                          \"buildId\": \"$(Build.BuildId)\",
+                          \"timestamp\": \"${TIMESTAMP}\",
+                          \"status\": \"$(Agent.JobStatus)\"
+                        }
+                      }
+                    }
+                  }" --max-time 15 || true
+
+                echo "Metrics logged to Application Insights"
+            condition: always()
