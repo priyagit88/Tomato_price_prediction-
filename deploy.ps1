@@ -15,6 +15,21 @@ param (
 $ErrorActionPreference = "Stop"
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 
+# -----------------------------------------------------------------------------
+# Ensure Azure CLI and Terraform are available in PATH
+# -----------------------------------------------------------------------------
+$extraPaths = @(
+    "$ScriptDir\bin",
+    "C:\Program Files\Microsoft SDKs\Azure\CLI2\wbin",
+    "C:\Program Files (x86)\Microsoft SDKs\Azure\CLI2\wbin"
+)
+
+foreach ($p in $extraPaths) {
+    if ((Test-Path $p) -and ($env:PATH -notlike "*$p*")) {
+        $env:PATH = "$p;" + $env:PATH
+    }
+}
+
 Write-Host "=================================================================" -ForegroundColor Cyan
 Write-Host "   AZURE TOMATO PRICE PREDICTION - AUTOMATED DEPLOYMENT          " -ForegroundColor Yellow
 Write-Host "=================================================================" -ForegroundColor Cyan
@@ -31,20 +46,41 @@ if ($LocalDockerOnly) {
 
 # 2. Azure CLI Verification
 Write-Host "`n[Step 1/6] Checking Azure CLI Authentication..." -ForegroundColor Cyan
-$accountJson = az account show --output json 2>$null
+
+$azCmd = Get-Command az -ErrorAction SilentlyContinue
+if (-not $azCmd) {
+    Write-Host "[!] Azure CLI ('az') not found in PATH." -ForegroundColor Red
+    Write-Host "    Please ensure Azure CLI is installed." -ForegroundColor Yellow
+    exit 1
+}
+
+$accountJson = $null
+try {
+    $accountJson = & az account show --output json 2>$null
+} catch {
+    $accountJson = $null
+}
+
 if (-not $accountJson -or $LASTEXITCODE -ne 0) {
-    Write-Host "[!] Azure CLI not logged in. Initiating Azure login..." -ForegroundColor Yellow
-    az login
-    $accountJson = az account show --output json
+    Write-Host "[!] Azure CLI not logged in. Initiating Azure login in your browser..." -ForegroundColor Yellow
+    & az login
+    $accountJson = & az account show --output json
 }
 
 $account = $accountJson | ConvertFrom-Json
 Write-Host "[+] Signed into Azure Subscription: $($account.name) ($($account.id))" -ForegroundColor Green
 Write-Host "    Account User: $($account.user.name)" -ForegroundColor DarkGray
 
-# 3. Terraform Infrastructure Provisioning
+# 3. Terraform Verification & Infrastructure Provisioning
 if (-not $SkipTerraformApply) {
     Write-Host "`n[Step 2/6] Provisioning Azure Cloud Services with Terraform..." -ForegroundColor Cyan
+    
+    $tfCmd = Get-Command terraform -ErrorAction SilentlyContinue
+    if (-not $tfCmd) {
+        Write-Host "[!] Terraform not found in PATH." -ForegroundColor Red
+        exit 1
+    }
+
     Set-Location -Path "$ScriptDir/terraform"
     
     Write-Host "--> Running terraform init..." -ForegroundColor DarkGray

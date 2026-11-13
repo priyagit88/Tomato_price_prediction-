@@ -43,6 +43,7 @@ frontend/out/
 
 # Terraform
 **/.terraform/*
+bin/
 *.tfstate
 *.tfstate.*
 crash.log
@@ -66,3 +67,4 @@ Thumbs.db
 *.log
 data/tomato_prices.db
 data/tomato_prices.db-journal
+
