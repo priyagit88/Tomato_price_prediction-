@@ -63,6 +63,10 @@ Thumbs.db
 *.swp
 *.swo
 
+# Presentation files (do not push)
+*.pptx
+*.ppt
+
 # Database & Logs
 *.log
 data/tomato_prices.db
