@@ -12,6 +12,12 @@ variable "subscription_id" {
   sensitive   = true
 }
 
+variable "notification_email" {
+  description = "Email address to receive daily tomato price predictions"
+  type        = string
+  default     = "priya@iservce.onmicrosoft.com"
+}
+
 variable "location" {
   description = "Azure region for all resources"
   type        = string

@@ -42,6 +42,7 @@ COPY api/ ./api/
 COPY ml_pipeline/ ./ml_pipeline/
 COPY data/ ./data/
 COPY models/ ./models/
+COPY frontend/out/ ./frontend/out/
 
 # Environment variables
 ENV PYTHONUNBUFFERED=1 \

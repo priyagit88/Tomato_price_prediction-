@@ -1,6 +1,6 @@
 # =============================================================================
 # 16. Azure Front Door
-#     CDN and global load balancing for the frontend web app
+#     CDN and global load balancing — points to Container Group (API + frontend)
 # =============================================================================
 
 resource "azurerm_cdn_frontdoor_profile" "main" {
@@ -27,22 +27,23 @@ resource "azurerm_cdn_frontdoor_origin_group" "frontend" {
   }
 
   health_probe {
-    path                = "/"
-    protocol            = "Https"
+    path                = "/api/health"
+    protocol            = "Http"
     interval_in_seconds = 60
   }
 }
 
 resource "azurerm_cdn_frontdoor_origin" "webapp" {
-  name                          = "webapp-origin"
-  cdn_frontdoor_origin_group_id = azurerm_cdn_frontdoor_origin_group.frontend.id
-  enabled                       = true
+  name                           = "webapp-origin"
+  cdn_frontdoor_origin_group_id  = azurerm_cdn_frontdoor_origin_group.frontend.id
+  enabled                        = true
 
-  host_name          = azurerm_linux_web_app.frontend.default_hostname
-  http_port          = 80
-  https_port         = 443
-  origin_host_header = azurerm_linux_web_app.frontend.default_hostname
-  certificate_name_check_enabled = true
+  # Point to the Container Group (prediction API + frontend)
+  host_name                      = azurerm_container_group.prediction_service.fqdn
+  http_port                      = 8000
+  https_port                     = 443
+  origin_host_header             = azurerm_container_group.prediction_service.fqdn
+  certificate_name_check_enabled = false
 }
 
 resource "azurerm_cdn_frontdoor_route" "frontend" {
@@ -51,9 +52,9 @@ resource "azurerm_cdn_frontdoor_route" "frontend" {
   cdn_frontdoor_origin_group_id = azurerm_cdn_frontdoor_origin_group.frontend.id
   cdn_frontdoor_origin_ids      = [azurerm_cdn_frontdoor_origin.webapp.id]
 
-  supported_protocols    = ["Https"]
+  supported_protocols    = ["Http", "Https"]
   patterns_to_match      = ["/*"]
-  forwarding_protocol    = "HttpsOnly"
-  https_redirect_enabled = true
+  forwarding_protocol    = "HttpOnly"
+  https_redirect_enabled = false
   link_to_default_domain = true
 }

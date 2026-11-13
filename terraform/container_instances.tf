@@ -1,5 +1,5 @@
 # =============================================================================
-# 8. Azure Container Instances (ACI)
+# Azure Container Instances (ACI)
 #    Runs the tomato price prediction service Docker container
 # =============================================================================
 
@@ -20,7 +20,7 @@ resource "azurerm_container_group" "prediction_service" {
 
   container {
     name   = "prediction-service"
-    image  = var.prediction_image
+    image  = "${azurerm_container_registry.main.login_server}/tomato-prediction-api:latest"
     cpu    = var.aci_cpu
     memory = var.aci_memory
 
@@ -30,16 +30,13 @@ resource "azurerm_container_group" "prediction_service" {
     }
 
     environment_variables = {
-      "ENVIRONMENT"          = var.environment
-      "REDIS_HOST"           = azurerm_redis_cache.main.hostname
-      "REDIS_PORT"           = tostring(azurerm_redis_cache.main.ssl_port)
-      "APPINSIGHTS_INSTRUMENTATIONKEY" = azurerm_application_insights.main.instrumentation_key
+      "ENVIRONMENT"                           = var.environment
+      "APPINSIGHTS_INSTRUMENTATIONKEY"        = azurerm_application_insights.main.instrumentation_key
+      "APPLICATIONINSIGHTS_CONNECTION_STRING" = azurerm_application_insights.main.connection_string
     }
 
     secure_environment_variables = {
-      "SQL_CONNECTION_STRING"     = "Server=tcp:${azurerm_mssql_server.main.fully_qualified_domain_name},1433;Initial Catalog=${azurerm_mssql_database.main.name};User ID=${var.sql_admin_username};Password=${var.sql_admin_password};Encrypt=True;"
-      "STORAGE_CONNECTION_STRING" = azurerm_storage_account.main.primary_connection_string
-      "REDIS_KEY"                 = azurerm_redis_cache.main.primary_access_key
+      "STORAGE_ACCOUNT_NAME" = "tomatostoreegk79m"
     }
   }
 

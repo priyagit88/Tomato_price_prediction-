@@ -110,8 +110,19 @@ def seed_database_if_empty():
         logger.warning("Database seeding skipped: %s", e)
 
 
-@app.get("/")
+from fastapi.responses import JSONResponse, FileResponse
+from fastapi.staticfiles import StaticFiles
+
+# Check for built frontend directory
+FRONTEND_DIST = os.path.join(ROOT_DIR, "frontend", "out")
+if os.path.exists(FRONTEND_DIST) and os.path.exists(os.path.join(FRONTEND_DIST, "assets")):
+    app.mount("/assets", StaticFiles(directory=os.path.join(FRONTEND_DIST, "assets")), name="assets")
+
+@app.api_route("/", methods=["GET", "HEAD"])
 def root():
+    index_file = os.path.join(FRONTEND_DIST, "index.html")
+    if os.path.exists(index_file):
+        return FileResponse(index_file)
     return {
         "service": settings.APP_NAME,
         "status": "online",
@@ -127,7 +138,7 @@ def root():
         ]
     }
 
-@app.get("/api/health")
+@app.api_route("/api/health", methods=["GET", "HEAD"])
 def health_check():
     model_exists = os.path.exists(settings.MODEL_PATH) or os.path.exists(os.path.join(ROOT_DIR, "models", "tomato_price_model.joblib"))
     return {
@@ -208,6 +219,33 @@ def get_historical_prices(market_id: str, limit: int = 60):
     if cached:
         return cached
     history = get_market_history(market_id, limit)
+    if not history or len(history) < 5:
+        try:
+            import pandas as pd
+            for fname in ["tomato_prices_processed.csv", "tomato_prices_2025.csv", "tomato_prices_2024.csv"]:
+                p = os.path.join(ROOT_DIR, "data", "processed", fname)
+                if not os.path.exists(p):
+                    p = os.path.join(ROOT_DIR, "data", "raw", fname)
+                if os.path.exists(p):
+                    df = pd.read_csv(p)
+                    m_df = df[df["market_id"].astype(str) == str(market_id)].sort_values("t").tail(limit)
+                    if len(m_df) > 0:
+                        history = [
+                            {
+                                "date": str(row["t"]),
+                                "market_id": str(row["market_id"]),
+                                "market_name": str(row.get("market_name", "")),
+                                "district_name": str(row.get("district_name", "")),
+                                "p_min": float(row.get("p_min", 0)),
+                                "p_max": float(row.get("p_max", 0)),
+                                "p_modal": float(row.get("p_modal", 0))
+                            }
+                            for _, row in m_df.iterrows()
+                        ]
+                        break
+        except Exception as e:
+            logger.warning("Historical CSV fallback failed: %s", e)
+            
     cache_manager.set(cache_key, history, ttl_seconds=300)
     return history
 

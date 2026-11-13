@@ -23,7 +23,7 @@ resource "azurerm_machine_learning_workspace" "main" {
   location                      = azurerm_resource_group.main.location
   application_insights_id       = azurerm_application_insights.ml.id
   key_vault_id                  = azurerm_key_vault.ml.id
-  storage_account_id            = azurerm_storage_account.ml.id
+  storage_account_id            = "/subscriptions/d6e4b3f9-95f1-4234-9b66-046747c96c0d/resourceGroups/rg-tomato-prediction/providers/Microsoft.Storage/storageAccounts/tomatomlsaegk79m"
   container_registry_id         = azurerm_container_registry.main.id
   public_network_access_enabled = true
 

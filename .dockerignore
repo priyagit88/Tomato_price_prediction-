@@ -40,7 +40,7 @@ env/
 # Node.js (for frontend)
 frontend/node_modules/
 frontend/.next/
-frontend/out/
+!frontend/out/
 frontend/.env.local
 frontend/.env.development.local
 frontend/.env.test.local
@@ -75,10 +75,9 @@ docs/
 .env.*
 !.env.example
 
-# Data files (large - mount as volumes instead)
-data/raw/*.csv
-data/processed/*.csv
-data/predictions/*.csv
+# Data files - include raw CSVs and daily predictions
+!data/raw/*.csv
+!data/predictions/daily_prediction.json
 
 # Logs
 logs/

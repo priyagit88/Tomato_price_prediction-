@@ -7,16 +7,17 @@
 # =============================================================================
 
 # General
-subscription_id     = "00000000-0000-0000-0000-000000000000"
-location            = "centralindia"
+subscription_id     = "d6e4b3f9-95f1-4234-9b66-046747c96c0d"
+location            = "eastus2"
 resource_group_name = "rg-tomato-prediction"
 project_name        = "tomato"
 environment         = "production"
 
 # Admin
-admin_email     = "admin@example.com"
-admin_object_id = "00000000-0000-0000-0000-000000000000"
-tenant_id       = "00000000-0000-0000-0000-000000000000"
+admin_email          = "priya@iservce.onmicrosoft.com"
+admin_object_id      = "51af22ec-181c-49d9-907b-dee1e0fe9275"
+tenant_id            = "cafd2576-1a76-444b-8308-df607f8b743d"
+notification_email   = "priya@iservce.onmicrosoft.com"
 
 # SQL Database
 sql_admin_username = "tomatoadmin"
